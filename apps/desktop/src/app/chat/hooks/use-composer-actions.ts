@@ -2,7 +2,7 @@ import { useCallback } from 'react'
 
 import { requestComposerFocus, requestComposerInsert, requestComposerInsertRefs } from '@/app/chat/composer/focus'
 import { droppedFileInlineRef } from '@/app/chat/composer/inline-refs'
-import { LARGE_PASTE_TITLE_PREVIEW_CHARS, pasteSizeLabel } from '@/app/chat/composer/large-paste'
+import { LARGE_PASTE_MAX_BYTES, LARGE_PASTE_TITLE_PREVIEW_CHARS, pasteSizeLabel } from '@/app/chat/composer/large-paste'
 import { formatRefValue } from '@/components/assistant-ui/directive-text'
 import { useI18n } from '@/i18n'
 import { attachmentPathNeedsUpload } from '@/lib/attachment-upload-policy'
@@ -776,7 +776,14 @@ export function useComposerActions({
       const messagingRow = storedId && $messagingSessions.get().find(row => sessionMatchesStoredId(row, storedId))
 
       if (messagingRow && isMessagingSource(messagingRow.source)) {
-        return false
+        if (new TextEncoder().encode(text).length <= LARGE_PASTE_MAX_BYTES) {
+          return false
+        }
+
+        // Over savePastedText's cap: drop it after the toast, as an attachable chat does.
+        notifyError(new Error(`Pasted text is too large (${pasteSizeLabel(text)})`), copy.pasteAttachFailed)
+
+        return true
       }
 
       try {

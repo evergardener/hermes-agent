@@ -2,9 +2,11 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { $composerAttachments, type ComposerAttachment, updateComposerAttachment } from '@/store/composer'
+import { $notifications } from '@/store/notifications'
 import { $connection, $messagingSessions, $selectedStoredSessionId } from '@/store/session'
 
 import { droppedFileInlineRefs } from '../composer/inline-refs'
+import { LARGE_PASTE_MAX_BYTES } from '../composer/large-paste'
 
 import {
   attachmentPreviewDataUrl,
@@ -553,6 +555,17 @@ describe('useComposerActions large paste in a messaging-platform chat', () => {
 
     expect(savePastedText).not.toHaveBeenCalled()
     expect(add).not.toHaveBeenCalled()
+  })
+
+  it('drops a paste over the save cap after the error toast instead of inlining it', async () => {
+    const { add, result, savePastedText } = pasteInto('tg-1')
+
+    // Two UTF-8 bytes per character: the cap counts bytes, not string length.
+    await expect(result.current.attachPastedText('é'.repeat(LARGE_PASTE_MAX_BYTES / 2 + 1))).resolves.toBe(true)
+
+    expect(savePastedText).not.toHaveBeenCalled()
+    expect(add).not.toHaveBeenCalled()
+    expect($notifications.get().at(-1)).toMatchObject({ kind: 'error', message: expect.stringContaining('too large') })
   })
 
   it('uses the selected chat when the main composer names none', async () => {
