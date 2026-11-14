@@ -9,6 +9,7 @@ import { attachmentPathNeedsUpload } from '@/lib/attachment-upload-policy'
 import { attachmentId, contextPath, pathLabel } from '@/lib/chat-runtime'
 import { readDesktopFileDataUrlLocalFirst, selectDesktopPaths } from '@/lib/desktop-fs'
 import { downscaleDataUrlForPreview } from '@/lib/image-resize'
+import { isMessagingSource } from '@/lib/session-source'
 import { normalize } from '@/lib/text'
 import {
   addComposerAttachment,
@@ -21,6 +22,7 @@ import {
   updateComposerAttachment
 } from '@/store/composer'
 import { notify, notifyError, readableError } from '@/store/notifications'
+import { $messagingSessions, sessionMatchesStoredId } from '@/store/session'
 
 import type { ImageDetachResponse } from '../../types'
 
@@ -440,13 +442,16 @@ interface ComposerActionsOptions {
   currentCwd: string
   requestGateway: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
   scope?: ComposerActionsScope
+  /** The stored chat this composer sends to, when it has one. */
+  storedSessionId?: null | string
 }
 
 export function useComposerActions({
   activeSessionId,
   currentCwd,
   requestGateway,
-  scope = MAIN_ACTIONS_SCOPE
+  scope = MAIN_ACTIONS_SCOPE,
+  storedSessionId = null
 }: ComposerActionsOptions) {
   const { t } = useI18n()
   const copy = t.desktop
@@ -754,12 +759,23 @@ export function useComposerActions({
    * Returns false (paste stays inline) when the desktop bridge is missing
    * or the write fails. A paste rejected for its size returns true after the
    * error toast: inlining it would put that oversized text in the editor.
+   * A messaging-platform chat also keeps the paste inline: the gateway
+   * refuses `file.attach` for a session that is not local, so the chip
+   * could never be sent, while the same text sends as a message.
    */
   const attachPastedText = useCallback(
     async (text: string) => {
       const save = window.hermesDesktop?.savePastedText
 
       if (!text || !save) {
+        return false
+      }
+
+      // Read at paste time: the list can load after this composer mounts.
+      const messagingRow =
+        storedSessionId && $messagingSessions.get().find(row => sessionMatchesStoredId(row, storedSessionId))
+
+      if (messagingRow && isMessagingSource(messagingRow.source)) {
         return false
       }
 
@@ -789,7 +805,7 @@ export function useComposerActions({
         return /too large/i.test(err instanceof Error ? err.message : String(err))
       }
     },
-    [attachToMain, copy.pasteAttachFailed, copy.pastedContent, currentCwd]
+    [attachToMain, copy.pasteAttachFailed, copy.pastedContent, currentCwd, storedSessionId]
   )
 
   const attachContextFolderPath = useCallback(

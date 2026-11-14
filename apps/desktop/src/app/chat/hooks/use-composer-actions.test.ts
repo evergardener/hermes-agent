@@ -2,7 +2,7 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { $composerAttachments, type ComposerAttachment, updateComposerAttachment } from '@/store/composer'
-import { $connection } from '@/store/session'
+import { $connection, $messagingSessions } from '@/store/session'
 
 import { droppedFileInlineRefs } from '../composer/inline-refs'
 
@@ -508,6 +508,58 @@ describe('useComposerActions generated paste title metadata', () => {
         titlePreview: pasted.slice(0, 1_000)
       })
     )
+  })
+})
+
+describe('useComposerActions large paste in a messaging-platform chat', () => {
+  afterEach(() => {
+    $messagingSessions.set([])
+    Reflect.deleteProperty(window, 'hermesDesktop')
+    vi.clearAllMocks()
+  })
+
+  // The gateway refuses a file attach for a session that is not a local one, so a paste
+  // turned into a file there could never be sent. It stays inline, like a typed message.
+  const pasteInto = (storedSessionId: string) => {
+    const savePastedText = vi.fn(async () => '/tmp/composer-pastes/pasted-content.txt')
+    const add = vi.fn<(attachment: ComposerAttachment) => void>()
+    Object.defineProperty(window, 'hermesDesktop', { configurable: true, value: { savePastedText } })
+    $messagingSessions.set([{ id: 'tg-1', source: 'telegram' }] as never)
+
+    const { result } = renderHook(() =>
+      useComposerActions({
+        activeSessionId: 'runtime-1',
+        currentCwd: '/test',
+        requestGateway: vi.fn(),
+        scope: {
+          add,
+          remove: vi.fn(() => null),
+          target: 'main',
+          update: vi.fn(() => true),
+          updateIfCurrent: vi.fn(() => true)
+        },
+        storedSessionId
+      })
+    )
+
+    return { add, result, savePastedText }
+  }
+
+  it('leaves the paste inline and writes no file', async () => {
+    const { add, result, savePastedText } = pasteInto('tg-1')
+
+    await expect(result.current.attachPastedText('x'.repeat(4_000))).resolves.toBe(false)
+
+    expect(savePastedText).not.toHaveBeenCalled()
+    expect(add).not.toHaveBeenCalled()
+  })
+
+  it('still attaches the paste in any other chat', async () => {
+    const { add, result } = pasteInto('desktop-1')
+
+    await expect(result.current.attachPastedText('x'.repeat(4_000))).resolves.toBe(true)
+
+    expect(add).toHaveBeenCalledWith(expect.objectContaining({ kind: 'file' }))
   })
 })
 
