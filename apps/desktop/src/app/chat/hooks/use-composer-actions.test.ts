@@ -2,7 +2,7 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { $composerAttachments, type ComposerAttachment, updateComposerAttachment } from '@/store/composer'
-import { $connection, $messagingSessions } from '@/store/session'
+import { $connection, $messagingSessions, $selectedStoredSessionId } from '@/store/session'
 
 import { droppedFileInlineRefs } from '../composer/inline-refs'
 
@@ -514,13 +514,14 @@ describe('useComposerActions generated paste title metadata', () => {
 describe('useComposerActions large paste in a messaging-platform chat', () => {
   afterEach(() => {
     $messagingSessions.set([])
+    $selectedStoredSessionId.set(null)
     Reflect.deleteProperty(window, 'hermesDesktop')
     vi.clearAllMocks()
   })
 
   // The gateway refuses a file attach for a session that is not a local one, so a paste
   // turned into a file there could never be sent. It stays inline, like a typed message.
-  const pasteInto = (storedSessionId: string) => {
+  const pasteInto = (storedSessionId?: null | string) => {
     const savePastedText = vi.fn(async () => '/tmp/composer-pastes/pasted-content.txt')
     const add = vi.fn<(attachment: ComposerAttachment) => void>()
     Object.defineProperty(window, 'hermesDesktop', { configurable: true, value: { savePastedText } })
@@ -538,7 +539,7 @@ describe('useComposerActions large paste in a messaging-platform chat', () => {
           update: vi.fn(() => true),
           updateIfCurrent: vi.fn(() => true)
         },
-        storedSessionId
+        ...(storedSessionId === undefined ? {} : { storedSessionId })
       })
     )
 
@@ -552,6 +553,25 @@ describe('useComposerActions large paste in a messaging-platform chat', () => {
 
     expect(savePastedText).not.toHaveBeenCalled()
     expect(add).not.toHaveBeenCalled()
+  })
+
+  it('uses the selected chat when the main composer names none', async () => {
+    $selectedStoredSessionId.set('tg-1')
+    const { add, result, savePastedText } = pasteInto()
+
+    await expect(result.current.attachPastedText('x'.repeat(4_000))).resolves.toBe(false)
+
+    expect(savePastedText).not.toHaveBeenCalled()
+    expect(add).not.toHaveBeenCalled()
+  })
+
+  it('does not borrow the selected chat for a composer with no stored chat', async () => {
+    $selectedStoredSessionId.set('tg-1')
+    const { add, result } = pasteInto(null)
+
+    await expect(result.current.attachPastedText('x'.repeat(4_000))).resolves.toBe(true)
+
+    expect(add).toHaveBeenCalledWith(expect.objectContaining({ kind: 'file' }))
   })
 
   it('still attaches the paste in any other chat', async () => {

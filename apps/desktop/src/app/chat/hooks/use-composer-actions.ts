@@ -22,7 +22,7 @@ import {
   updateComposerAttachment
 } from '@/store/composer'
 import { notify, notifyError, readableError } from '@/store/notifications'
-import { $messagingSessions, sessionMatchesStoredId } from '@/store/session'
+import { $messagingSessions, $selectedStoredSessionId, sessionMatchesStoredId } from '@/store/session'
 
 import type { ImageDetachResponse } from '../../types'
 
@@ -442,7 +442,7 @@ interface ComposerActionsOptions {
   currentCwd: string
   requestGateway: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
   scope?: ComposerActionsScope
-  /** The stored chat this composer sends to, when it has one. */
+  /** The stored chat this composer sends to. Left out by the main composer, which sends to the selected chat. */
   storedSessionId?: null | string
 }
 
@@ -451,7 +451,7 @@ export function useComposerActions({
   currentCwd,
   requestGateway,
   scope = MAIN_ACTIONS_SCOPE,
-  storedSessionId = null
+  storedSessionId
 }: ComposerActionsOptions) {
   const { t } = useI18n()
   const copy = t.desktop
@@ -772,8 +772,8 @@ export function useComposerActions({
       }
 
       // Read at paste time: the list can load after this composer mounts.
-      const messagingRow =
-        storedSessionId && $messagingSessions.get().find(row => sessionMatchesStoredId(row, storedSessionId))
+      const storedId = storedSessionId === undefined ? $selectedStoredSessionId.get() : storedSessionId
+      const messagingRow = storedId && $messagingSessions.get().find(row => sessionMatchesStoredId(row, storedId))
 
       if (messagingRow && isMessagingSource(messagingRow.source)) {
         return false
