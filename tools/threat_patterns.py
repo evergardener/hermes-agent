@@ -22,7 +22,7 @@ _SECRET_VAR = r"\$\{?\w*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)S?\b"
 # Verb prefix for "modify agent config" patterns.
 _MODIFY = r"(update|modify|edit|write|change|append|add\s+to)\s+[^\n]{0,2048}"
 # (regex, pattern_id, scope); scope ∈ {"all", "context", "strict"}
-_PATTERNS: List[Tuple[str, str, str]] = [
+_PATTERNS: list[tuple[str, str, str]] = [
     # ── Classic prompt injection (applies everywhere) ────────────────
     (rf'ignore\s+{_FILLER}(previous|all|above|prior)\s+{_FILLER}instructions', "prompt_injection", "all"),
     (r'system\s+prompt\s+override', "sys_prompt_override", "all"),
@@ -30,7 +30,11 @@ _PATTERNS: List[Tuple[str, str, str]] = [
     (rf'act\s+as\s+(if|though)\s+{_FILLER}you\s+{_FILLER}(have\s+no|don\'t\s+have)\s+{_FILLER}(restrictions|limits|rules)', "bypass_restrictions", "all"),
     (r'<!--[^>]{0,512}(?:ignore|override|system|secret|hidden)[^>]{0,512}-->', "html_comment_injection", "all"),
     (r'<\s*div\s+style\s*=\s*["\'][^>]{0,2048}display\s*:\s*none', "hidden_div", "all"),
-    (r'translate\s+[^\n]{0,512}\s+into\s+[^\n]{0,512}\s+and\s+(execute|run|eval)', "translate_execute", "all"),
+    (
+        r"translate\s+[^\n]{0,512}\s+into\s+\w+(?:[\s-]+\w+){0,2}\s+and\s+(execute|run|eval)\b",
+        "translate_execute",
+        "all",
+    ),
     (rf'do\s+not\s+{_FILLER}tell\s+{_FILLER}the\s+user', "deception_hide", "all"),
 
     # ── Role-play / identity hijack (scraped web content, poisoned context files) ──
@@ -76,28 +80,53 @@ _PATTERNS: List[Tuple[str, str, str]] = [
 
     # ── Persistence / SSH backdoor (strict scope — memory + skills) ──
     (r'authorized_keys', "ssh_backdoor", "strict"),
-    (r'\$HOME/\.ssh|\~/\.ssh', "ssh_access", "strict"),
+    # Write-verb gated like the *_config_mod rules: a bare path match blocked ordinary docs
+    # ("check $HOME/.ssh is chmod 700"). ``>>?`` covers a leading redirect with no verb word;
+    # ``open(`` covers the scripted-write shape; chmod/chown/sed/truncate/rm/touch/curl/wget/git
+    # mutate the directory without an obvious copy verb.
+    (r'(?:\b(?:echo|cat|cp|mv|dd|tee|install|printf|rsync|scp|ln|append|add|write'
+     r'|sed|chmod|chown|truncate|rm|touch|curl|wget|git)\b|\bopen\s*\(|>>?)'
+     r'[^\n]{0,512}(?:\$HOME/\.ssh|~/\.ssh)', "ssh_access", "strict"),
     (r'\$HOME/\.hermes/\.env|\~/\.hermes/\.env', "hermes_env", "strict"),
     (rf'{_MODIFY}(?:AGENTS\.md|CLAUDE\.md|\.cursorrules|\.clinerules)', "agent_config_mod", "strict"),
     (rf'{_MODIFY}\.hermes/(config\.yaml|SOUL\.md)', "hermes_config_mod", "strict"),
 
     # ── Hardcoded secrets ────────────────────────────────────────────
-    (r'(?:api[_-]?key|token|secret|password)\s*[=:]\s*["\'][A-Za-z0-9+/=_-]{20,}', "hardcoded_secret", "strict"),
+    # The lookahead skips a value that is itself an environment-variable NAME
+    # (SHOUTY_SNAKE, ≥2 underscore-separated segments): ENV_PASSWORD =
+    # "MYPLUGIN_APP_PASSWORD" says where the credential lives, it does not embed
+    # one (#116221). Scoped case-sensitive on purpose — the pattern compiles with
+    # IGNORECASE and a lowercase snake value is the password-passphrase shape
+    # ("correct_horse_battery_staple"); requiring an underscore segment keeps
+    # underscore-free all-caps credentials (AWS AKIA…, base32) matched.
+    (r'(?:api[_-]?key|token|secret|password)\s*[=:]\s*["\']'
+     r'(?!(?-i:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)["\'])'
+     r'[A-Za-z0-9+/=_-]{20,}', "hardcoded_secret", "strict"),
 ]
 
-# Invisible / bidirectional unicode used in injection attacks (aligned with skills_guard.py
-# INVISIBLE_CHARS): zero-width space/non-joiner/joiner, word joiner, invisible times/separator/
-# plus, BOM, LTR/RTL embedding + pop + overrides, LTR/RTL/first-strong isolates + pop.
+# Invisible / bidirectional unicode used in injection attacks: zero-width space/non-joiner/joiner,
+# word joiner, invisible times/separator/plus, BOM, LTR/RTL embedding + pop + overrides, LTR/RTL/
+# first-strong isolates + pop (the same set as skills_guard.py INVISIBLE_CHARS), plus the Unicode TAG
+# block U+E0000–U+E007F: invisible, maps 1:1 onto ASCII ("ASCII smuggling"); skills_guard lacks it (#78952).
 INVISIBLE_CHARS = frozenset(
     "\u200b\u200c\u200d\u2060\u2062\u2063\u2064\ufeff"
-    "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+    "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
+) | frozenset(map(chr, range(0xE0000, 0xE0080)))
+
+# The RGI subdivision flags (England, Scotland, Wales: U+1F3F4 + tag letters + CANCEL TAG) are the one
+# legitimate use of TAG chars. Only those three are exempt: a generic "flag-shaped" exemption lets a
+# run of fake flags carry a smuggled sentence a few tag letters at a time.
+_RGI_SUBDIVISION_FLAGS = ("gbeng", "gbsct", "gbwls")
+_FLAG_LEN = 7  # U+1F3F4 + five tag letters + CANCEL TAG
+EMOJI_TAG_SEQUENCE_RE = re.compile(
+    "|".join("\U0001F3F4" + "".join(chr(0xE0000 + ord(c)) for c in code) + "\U000E007F" for code in _RGI_SUBDIVISION_FLAGS))
 
 # Compiled per scope at import; inclusion is cumulative (all ⊂ context ⊂ strict).
 _SCOPE_SETS = {"all": ("all", "context", "strict"), "context": ("context", "strict"), "strict": ("strict",)}
 
 
-def _compile() -> dict[str, List[Tuple[re.Pattern, str]]]:
-    compiled: dict[str, List[Tuple[re.Pattern, str]]] = {"all": [], "context": [], "strict": []}
+def _compile() -> dict[str, list[tuple[re.Pattern, str]]]:
+    compiled: dict[str, list[tuple[re.Pattern, str]]] = {"all": [], "context": [], "strict": []}
     for pattern, pid, scope in _PATTERNS:
         if scope not in _SCOPE_SETS:
             raise ValueError(f"threat_patterns: unknown scope {scope!r} for pattern {pid!r}")
@@ -109,16 +138,20 @@ def _compile() -> dict[str, List[Tuple[re.Pattern, str]]]:
 _COMPILED = _compile()
 
 
-def scan_for_threats(content: str, scope: str = "context") -> List[str]:
+def scan_for_threats(content: str, scope: str = "context") -> list[str]:
     """Matched pattern IDs in ``content`` for ``scope``; invisible codepoints are
     reported as ``"invisible_unicode_U+XXXX"``. Raises ValueError on an unknown scope."""
     if not content:
         return []
     if (patterns := _COMPILED.get(scope)) is None:
         raise ValueError(f"scan_for_threats: unknown scope {scope!r}")
-    content = content[:MAX_SCAN_CHARS]
+    # Flags are matched with a look-ahead past the cut so one straddling MAX_SCAN_CHARS stays exempt;
+    # only chars before the cut are reported.
     # Invisible unicode is checked on the RAW content: NFKC below can strip these codepoints.
-    findings: List[str] = [f"invisible_unicode_U+{ord(ch):04X}" for ch in set(content) & INVISIBLE_CHARS]
+    raw_chars = set(EMOJI_TAG_SEQUENCE_RE.sub(
+        lambda m: " " * len(m[0]), content[:MAX_SCAN_CHARS + _FLAG_LEN - 1])[:MAX_SCAN_CHARS])
+    content = content[:MAX_SCAN_CHARS]
+    findings: list[str] = [f"invisible_unicode_U+{ord(ch):04X}" for ch in raw_chars & INVISIBLE_CHARS]
     # NFKC folds full-width / compatibility variants (ｃａｔ → cat) against homograph bypass.
     # It does NOT fold cross-script confusables (Cyrillic ``а``) — that needs a TR#39 database.
     normalised = unicodedata.normalize("NFKC", content)
@@ -140,4 +173,4 @@ def first_threat_message(content: str, scope: str = "strict") -> Optional[str]:
             f"injection or exfiltration payloads.")
 
 
-__all__ = ["INVISIBLE_CHARS", "MAX_SCAN_CHARS", "scan_for_threats", "first_threat_message"]
+__all__ = ["EMOJI_TAG_SEQUENCE_RE", "INVISIBLE_CHARS", "MAX_SCAN_CHARS", "first_threat_message", "scan_for_threats"]
