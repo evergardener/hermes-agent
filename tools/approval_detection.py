@@ -6,7 +6,6 @@ prompting live here.
 
 import bisect
 import fnmatch
-import functools
 import logging
 import os
 import re
@@ -15,6 +14,7 @@ import tempfile
 import unicodedata
 
 from tools.approval_ansi_c import _is_shell_comment_start, expand_ansi_c_quotes
+from tools.approval_home_fold import _rewrite_resolved_hermes_home, _rewrite_resolved_user_home
 
 logger = logging.getLogger("tools.approval")
 
@@ -848,58 +848,6 @@ def _lower_preserving_flags(command: str) -> str:
     pattern explicitly scopes a case-sensitive group. Non-flag tokens (command words, quoted
     prose, paths) are lowercased exactly as before; separators and whitespace are untouched."""
     return ''.join(t if t.startswith('-') else t.lower() for t in re.split(r'(\s+)', command))
-
-
-# Shell metacharacters, quotes, and whitespace that terminate a path token.
-_PATH_TOKEN_STOP = r"""\s'"`;|&<>()"""
-_PATH_TAIL = r"(?P<tail>(?:[/\\][^/\\" + _PATH_TOKEN_STOP + r"]*)+)"
-
-
-@functools.lru_cache(maxsize=64)
-def _home_prefix_fold_regex(path: str):
-    """Compile a regex matching *path* as an absolute directory prefix.
-    Components match with either separator so native Windows, forward-slash, and mixed forms all
-    fold; the caller normalizes the tail's backslashes to ``/``. A non-empty tail is required, so a
-    bare home is never folded. Returns ``None`` for an unset/degenerate path (fewer than two
-    components: ``/``, ``C:\\``, ``""``) so a stray HOME cannot rewrite unrelated prefixes."""
-    components = [c for c in re.split(r"[/\\]+", path) if c] if path else []
-    if len(components) < 2:
-        return None
-    # Optional leading root separator; a Windows drive letter is a component.
-    return re.compile(r"[/\\]*" + r"[/\\]+".join(re.escape(c) for c in components) + _PATH_TAIL)
-
-
-def _fold_home_prefixes(command: str, paths, replacement: str) -> str:
-    """Fold each resolved home prefix in *command* to *replacement* (no trailing separator; the tail
-    supplies it). Longest first so a deeper home folds before a shorter overlapping one that would clobber it."""
-    for path in dict.fromkeys(sorted((p for p in paths if p), key=len, reverse=True)):
-        pattern = _home_prefix_fold_regex(path)
-        if pattern is not None:
-            command = pattern.sub(lambda m: replacement + m.group("tail").replace("\\", "/"), command)
-    return command
-
-
-def _rewrite_resolved_user_home(command: str) -> str:
-    """User home (expanduser / realpath / $HOME) -> ``~/``; no-op when unset, degenerate, or unresolvable."""
-    try:
-        # expanduser, realpath, and an explicit HOME — Windows expanduser uses USERPROFILE, not HOME.
-        home = os.path.expanduser("~")
-        paths = [home, os.path.realpath(home), os.environ.get("HOME", "")]
-    except Exception:
-        return command
-    return _fold_home_prefixes(command, paths, "~")
-
-
-def _rewrite_resolved_hermes_home(command: str) -> str:
-    """Resolved HERMES_HOME (and its realpath) -> ``~/.hermes/`` so the _HERMES_CONFIG_PATH /
-    _HERMES_ENV_PATH rules match Docker/gateway deployments that spell the absolute path."""
-    try:
-        from hermes_constants import get_hermes_home
-        home = get_hermes_home().expanduser()
-        paths = [str(home), str(home.resolve(strict=False))]
-    except Exception:
-        return command
-    return _fold_home_prefixes(command, paths, "~/.hermes")
 
 
 _PARAM_REPLACEMENT_RE = re.compile(r"\$\{[^}/\s]+/[^}/]*/(?P<replacement>[^}]*)\}")
